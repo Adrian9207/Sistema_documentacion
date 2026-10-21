@@ -7,7 +7,9 @@ const cors = require('cors');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const pool = require('./db')
+const pool = require('./db');
+const { error } = require('console');
+const fs = require('fs');
 
 const SECRET_KEY = process.env.SECRET_KEY || 'clave_secreta_desrrollo_local';
 
@@ -28,6 +30,13 @@ if (!process.env.ADMIN_BOOTSTRAP_TOKEN) {
 // arreglos temporales para simular la base de datos
 const usuarios = [];  // { id, tipo, nombre?, dni?, email, password }
 const dnisValidos = [];  // DNIs de trabajadores autorizados por un admin
+const documentos = []; // {id, remitente, destinatario, asunto, archivo, nombreOriginal, fecha, seccion, delegadoA }
+const SECCIONES_MOVILES = ['firma', 'proceso', 'entrada', 'delegados'];
+const TIPOS_DOCUMENTO = (s = '') => ['incidente', 'solicitud_empleo',
+    'certificado_estudios', 'constancia_estudios', 'solicitud_practicas', 'solicitud_permiso', 'solicitud_licencia', 'otros'];
+
+// minúsculas y sin tildes, para buscar "jose" y encontrar "José"
+const normalizar = (s = '') => s.normalize('NFD').replace(/[\u03000-\u036f]/g, '').toLowerCase().trim();
 
 // conexion a la base de datos PostgreSQL
 pool.query('SELECT NOW()')
@@ -193,40 +202,138 @@ const storage = multer.diskStorage({
   } // Nombre único para cada archivo
 });
 
-const upload = multer({
-    storage: storage, 
-    limits: { fileSize: MAX_SIZE_BYTES }, // Limite de tamaño de archivo
+const subirArchivo = (req, res, next) => {
+    upload.single('documento')(req, res, (err) => {
+        if (err instanceof multer.MulterError) {
+            const msg = err.code === 'LIMIT_FILE_SIZE'
+                ? `El archivo excede el tamaño maximo permitido de {MAX_FILE_SIZE_MB} MB.`
+                : `Error en la subida: ${err.message}`;
+            return res.status(400).json({ error: msg });
+        }
+        if (err) return res.status(500).json ({ error: 'Error al procesar el archivo.'})
+        next();
+    });
+};
+
+// Buscar usuarios (solo admin): común por nombre, trabajador por DNI
+app.get('/api/usuarios/buscar', verificarToken, verificarAdmin, (req, res) => {
+    const { tipo, q }= req.query;
+    if (!['usuario', 'trabajador'].includes(tipo)) {
+        return res.status(400).json({ error: 'Tipo de busqueda invalido.' });
+    }
+    const termino = normalizar(q);
+    if (termino.length < 2) return res.json([]);
+
+    const resultados = usuarios
+        .filter(u => u.tipo === tipo)
+        .filter(u => tipo === 'usuario'
+            ? normalizar(u.nombre).includes(termino)
+            : u.dni.startsWith(q.trim()))
+        .slice(0, 10)
+        .map(u => ({ tipo: u.tipo, nombre: u.nombre || null, dni: u.dni || null, email: u.email}));
+
+    res.json(resultados);
 });
 
-// ruta protegida de subida de archivos con manejo de errores de multer
-app.post('/api/upload', verificarToken, (req, res) => {
-    // ejecutamos la funcion de subida dentro de un callback para capturar errores de multer
-    upload.single('documento')(req, res, (err) => {
-        // validar si multer arrojo un error (como exceder el tamaño)
-        if (err instanceof multer.MulterError) {
-            if (err.code === 'LIMIT_FILE_SIZE') {
-                return res.status(400).json({ 
-                    error: `El archivo excede el tamaño máximo permitido de ${MAX_FILE_SIZE_MB} MB.`
-                });
-            }
-            return res.status(400).json({ error: `Error en la subida: ${err.message}` });
-        } else if (err) {
-            return res.status(500).json({ error: 'Error interno del servidor al procesar el archivo.' });
-        }
+app.post('/api/derivar', verificarToken, subirArchivo, (req, res) => {
+    if (!req.file) return res.status(400). json({ error: 'Selecione un archivo.' });
 
-        // validar que el usuario haya subido un archivo
-        if (!req.file) {
-            return res.status(400).json({ error: 'Porfavor, seleccione un archivo para subir.' });
-        }
+    // Si algo falla, borramos el archivo ya guardado por multer
+    const rechazar = (status, error) => {
+        fs.unlink(req.file.path, () => {});
+        return res.status(status). josn({ error });
+    };
 
-        // respuesta exitosa
-        res.json({
-            mensaje: 'Archivo subido exitosamente.',
-            usuario: req.user.nombre,
-            archivo: req.file.filename,
-            tamanoMB: (req.file.size / (1024 * 1024)).toFixed(2) // tamaño en MB
-        });
+    const { tipoDocumento, tipoOtro, asunto, nombreCompleto, telefono } = req.body;
+    const { tipo, email } = req.user;
+
+    if (!TIPOS_DOCUMENTO.includes(tipoDocumento)) return rechazar(400, 'Tipo de documento invalido.');
+    if (tipoDocumento === 'otros' && !tipoOtro?.trim()) return rechazar(400, 'Especifica el tipo de documento.');
+    if (!asunto?.trim()) return rechazar(400, 'El asunto es requrido.');
+
+    if (tipo === 'usuario') {
+        if (!nombreCompleto?.trim()) return rechazar(400, 'El nombre y apellido son requeridos.');
+        if (!/^9\d{8}$/.test(telefono || '')) return rechazar(400, 'El teléfono debe tener 9 dígitos y empezar con 9.');
+    }
+
+    // Destinatario: admin elige; los demas simepre van al administrador
+    let destinatario;
+    if (tipo === 'administrador') {
+        destinatario = req.body.destinatario;
+        if (destinatario === email) return rechazar(400, 'No puedes derivarte un documento a ti mismo.');
+        if(!usuarios.find(u => u.email === destinatario)) return rechazar(400, 'El destinatario no existe.');
+    } else {
+        const admin = usuarios.find(u => u.tipo === 'administrador');
+        if (!admin) return rechazar(400, 'Aun no hay un administrador registrado,');
+        destinatario = admin.email;
+    }
+
+    documentos.push({
+        id: Date.now().toString(),
+        remitente: email,
+        destinatario,
+        tipoDocumento,
+        tipoOtro: tipoDocumento === 'otros' ? tipoOtro.trim() : null,
+        asunto: asunto.trim(),
+        nombreRemitente: tipo === 'usuario' ? nombreCompleto.trim() : null,
+        telefono: tipo === 'usuario' ? telefono : null,
+        archivo: req.file.filename,
+        nombreOriginal: req.file.originalname,
+        fecha: new Date().toString(),
+        seccion: 'entrada',
+        delegadoA: null
     });
+    res.status(201).json({ mensaje: 'Documento derivado correctamente.'});
+});
+
+// Listar documentos por seccion, validando permisos por rol
+const SECCIONES_POR_ROL = {
+    administrador: ['firma', 'proceso', 'entrada', 'delegados', 'salida'],
+    trabajador: ['entrada', 'delegados', 'salida'],
+    usuario: ['entrada', 'salida']
+};
+
+app.get('/api/documentos', verificarToken, (req, res) => {
+    const { seccion } = req.query;
+    const { tipo, email } = req.user;
+
+    if (!SECCIONES_POR_ROL[tipo]?.includes(seccion)) {
+        return res.status(403).json({error: 'No tienes acceso a esta seccion.' });
+    }
+
+    let lista;
+    switch (seccion) {
+        case 'entrada':
+            lista = documentos.filter(d => d.seccion === 'entrada' && d.destinatario === email); break;
+        case 'salida':
+            lista = documentos.filter(d => d.remitente === email); break;
+        case 'delegados':
+            lista = documentos.filter(d => d.seccion === 'delegados' && (tipo === 'administrador' || d.delegadoA === email)); break;
+        default: // firma, proceso (solo admin, ya validado)
+            lista = documentos.filter(d => d.seccion === seccion);
+    }
+    res.json(lista);
+});
+
+// Mover documento entre secciones (solo admin)
+app.patch('/api/documentos/:id/mover', verificarToken, verificarAdmin, (req, res) => {
+    const { destino, delegadoA } = req.body;
+    if (!SECCIONES_MOVILES.includes(destino)) {
+        return res.status(400).json({ error: 'Seccion de destino invalida.' });
+    }
+    const doc = documentos.find(d => d.id === req.params.id);
+    if (!doc) return res.status(404).json({ error: 'Documento  no encontrado.' });
+
+    if  (destino === 'delegados') {
+        if (!usuarios.find(u => u.email === delegadoA && u.tipo === 'trabajador')) {
+            return res.status(400).json({ error: 'El delegado debe ser un trabajadpr registrado.' });
+        }
+        doc.delegadoA = delegadoA;
+    } else {
+        doc.delegadoA = null;
+    }
+    doc.seccion = destino;
+    res.json({ mensaje: 'Documento movido correctamente.' });
 });
 
 // iniciar servidor en el puerto 5000

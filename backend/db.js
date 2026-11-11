@@ -1,9 +1,9 @@
 const { Pool } = require('pg')
 
 const pool = new Pool({
-    user: 'postgres', // cambiar el usuario en la base de datos PostgreSQL, pensar dos veces.
+    user: process.env.DB_USER,
     host: 'localhost',
-    database: 'gestion_documentos', // crear la base de datos en PostgreSQL, verificarlo
+    database: 'gestion_documentos',
     password: process.env.DB_KEY,
     port: 5432
 });

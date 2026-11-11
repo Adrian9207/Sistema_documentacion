@@ -26,7 +26,6 @@ function App() {
     setVista('login');
   };
 
-
   if (!usuario) {
     return (
       <div>

@@ -9,7 +9,7 @@ export default function Dashboard({ usuario, alCerrarSesion }) {
     const [activa, setActiva] = useState('entrada');
 
     return (
-        <div Style={{display: 'flex', minHeight: '100vh'}}>
+        <div style={{display: 'flex', minHeight: '100vh'}}>
             <nav style={{width: 220, padding: 16, borderRight: '1px solid #ccc', display: 'flex', flexDirection: 'column', gap: 8}}>
                 <h3>{usuario.nombre || usuario.email}</h3>
                 <small>{usuario.tipo}</small>

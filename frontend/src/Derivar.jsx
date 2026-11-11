@@ -132,7 +132,7 @@ export default function Derivar({ usuario }) {
                         placeholder={tipoBusqueda === 'usuario' ? 'Buscar por nombre completo' : 'Buscar por DNI'} />
                     {lista.length > 0 && (
                         <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0'}}>
-                            {lista.map((u) = (
+                            {lista.map((u) => (
                                 <li key={u.email}>
                                     <button type='button' onClick={() => {setDestinatario(u); setConsulta(''); setResultados([]);}}>
                                     {u.nombre || `DNI ${u.dni}`} - {u.email}

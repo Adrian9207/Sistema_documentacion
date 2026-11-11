@@ -12,6 +12,7 @@ export default function Bandeja({ seccion, usuario }) {
     const token = localStorage.getItem('token');
     const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
     const puedeMover = usuario.tipo === 'administrador' && seccion !== 'salida';
+    const puedeFirmar = usuario.tipo === 'administrador' && seccion === 'firma';
 
     const cargar = useCallback(async () => {
         try {
@@ -42,6 +43,46 @@ export default function Bandeja({ seccion, usuario }) {
         if (!res.ok) return setError(data.error);
         cargar();
     };
+
+    const firmar = async (docId, archivo) => {
+        if (!archivo) return;
+        const fd = new FormData();
+        fd.append('documento', archivo);
+        try {
+            const res = await fetch(`${API}/documentos/${docId}/firmar`, {
+                method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd
+            });
+            const data = await res.json();
+            if (!res.ok) return setError(data.error);
+            setError('');
+            cargar();
+        } catch {
+            setError('Error al subir la version firmada.');
+        }
+    };
+
+    // El token va a en el header, por eso se descarga como blob y no con un <a herf>
+    const descargar = async (docId, v) => {
+        try {
+            const res = await fetch(`${API}/documentos/${docId}/versiones/${v.id}/descargar`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (!res.ok) {
+                const data = await res.json();
+                return setError(data.error);
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = v.nombre;
+            a.click();
+            URL.revokeObjectURL(url);
+        } catch {
+            setError('Error al descargar el archivo.');
+        }
+    };
+
     
     return (
         <div>
@@ -50,18 +91,33 @@ export default function Bandeja({ seccion, usuario }) {
                 <table>
                     <thead>
                         <tr>
-                            <th>Fecha</th><th>Asunto</th><th>De</th><th>Para</th><th>Archivo</th>
+                            <th>Fecha</th><th>Tipo</th><th>Asunto</th><th>De</th><th>Telefono</th><th>Para</th><th>Archivo</th>
+                            {puedeFirmar && <th>Subir firmada</th>}
                             {puedeMover && <th>Acción</th>}
                         </tr>
                     </thead>
                     <tbody>
                         {docs.map((d) => (
                             <tr key={d.id}>
+                                <td>{new Date(d.fecha).toLocaleString('es-PE')}</td>
                                 <td>{etiquetaTipo(d)}</td>
                                 <td>{d.asunto}</td>
                                 <td>{d.nombreRemitente || d.remitente}</td>
                                 <td>{d.telefono}</td>
                                 <td>{d.destinatario}</td>
+                                <td>
+                                    {d.versiones.map((v) => (
+                                        <button key={v.id} type="button" onClick={() => descargar(d.id, v)}>
+                                            {v.clase === 'original' ? 'Original' : 'Firmada'}
+                                        </button>
+                                    ))}
+                                </td>
+                                {puedeFirmar && (
+                                    <td>
+                                        <input type="file" accept="application/pdf" 
+                                            onChange={(e) => {firmar(d.id, e.target.files[0]); e.target.value = ''; }}/>
+                                    </td>
+                                )}
                                 {puedeMover && (
                                     <td>
                                         <select value="" onChange={(e) => mover(d.id, e.target.value)}>

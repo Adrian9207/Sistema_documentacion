@@ -6,6 +6,12 @@ export default function AutorizarDni() {
 
     const agregar = async (e) => {
         e.preventDefault();
+
+        if (dni.length !== 8) {
+            setMensaje('El DNI debe tener 8 dígitos.');
+            return;
+        }
+
         try {
             const res = await fetch('http://localhost:5000/api/admin/dnis', {
                 method: 'POST',
@@ -20,10 +26,17 @@ export default function AutorizarDni() {
         }
     };
 
+    const manejarCambioDni = (e) => {
+        const valor = e.target.value;
+        if (/^\d*$/.test(valor) && valor.length <= 8) {
+            setDni(valor);
+        }
+    };
+
     return (
         <form onSubmit={agregar}>
             <input type="text" placeholder="DNI a autorizar" value={dni} 
-                onChange={(e) => setDni(e.target.value)} required />
+                onChange={manejarCambioDni} pattern="[0-9]{8}" title="El DNI debe tener 8 dígitos" required />
             <button type="submit">Autorizar DNI</button>
             {mensaje && <p>{mensaje}</p>}
         </form>

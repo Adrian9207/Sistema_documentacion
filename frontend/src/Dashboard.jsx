@@ -3,6 +3,7 @@ import { SECCIONES, seccionesPara } from "./secciones";
 import Bandeja from "./Bandeja";
 import Derivar from "./Derivar";
 import AutorizarDni from "./AutorizarDni";
+import Plantillas from "./Plantillas";
 
 export default function Dashboard({ usuario, alCerrarSesion }) {
     const menu = seccionesPara(usuario.tipo);
@@ -25,9 +26,10 @@ export default function Dashboard({ usuario, alCerrarSesion }) {
 
             <main style = {{flex: 1, padding: 24}}>
                 <h2>{SECCIONES[activa].titulo}</h2>
-                {activa === 'derivar' ? <Derivar usuario={usuario} />
-                : activa === 'dnis' ? <AutorizarDni />
-                : <Bandeja key={activa} seccion={activa} usuario={usuario} />}
+                {activa === 'derivar' ? ( <Derivar usuario={usuario} /> )
+                : activa === 'dnis' ? ( <AutorizarDni /> )
+                : activa === 'platillas' ? ( <Plantillas usuario={usuario} /> )
+                : (<Bandeja key={activa} seccion={activa} usuario={usuario} /> )}
             </main>
         </div>
     );

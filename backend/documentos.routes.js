@@ -4,9 +4,11 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const pool = require('./db');
+const { error } = require('console');
 
 // configuracion de almacenamiento
 const STORAGE_DIR = path.resolve(process.env.STORAGE_DIR || './storage');
+
 // puedes cambiarla la configuracion de almacenamineto
 const MAX_FILE_SIZE_MB = 10;
 const EXTENSIONES = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.png', '.jpg', '.jpeg'];
@@ -34,10 +36,20 @@ const storage = multer.diskStorage({
         cb(null, crypto.randomUUID() + path.extname(file.originalname).toLowerCase())
 });
 
+const storagePlantillas = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = path.join(STORAGE_DIR, 'plantillas');
+        fs.mkdirSync(dir, { recursive: true});
+        cb(null, dir);
+    },
+    filename: (req, file, cb) =>
+        cb(null, crypto.randomUUID() + path.extname(file.originalname).toLowerCase())
+});
+
 // Un middleware de subida que solo acepta las extensiones indicadas
-const crearSubida = extensiones => {
+const createSubida = (extensiones, almacenamiento = storage) => {
     const upload = multer({
-        storage,
+        storage: almacenamiento,
         limits: { fileSize: MAX_FILE_SIZE_MB * 1024 * 1024 },
         fileFilter: (req, file, cb) => {
             const ext = path.extname(file.originalname).toLowerCase();
@@ -60,8 +72,9 @@ const crearSubida = extensiones => {
     };
 };
 
-const subirArchivo = crearSubida(EXTENSIONES); // original: varios formatos
-const subirFirmada = crearSubida(['.pdf']); // firmada: solo pdf
+const subirArchivo = createSubida(EXTENSIONES); // original: varios formatos
+const subirFirmada = createSubida(['.pdf']); // firmada: solo pdf
+const subirPlantilla = createSubida(EXTENSIONES, storagePlantillas); //cofiguracion de plantillas
 
 const hashArchivo = (ruta) => new Promise((resolve, reject) => {
     const h = crypto.createHash('sha256');
@@ -108,8 +121,8 @@ module.exports = function (verificarToken, verificarAdmin) {
             fs.unlink(req.file.path, () => {});
             return res.status(status).json({ error });
         };
-
         const client = await pool.connect();
+        
         try {
             const { tipoDocumento, tipoOtro, asunto, nombreCompleto, telefono } = req.body;
             const { tipo, email, id: usuarioId } = req.user;
@@ -191,7 +204,7 @@ module.exports = function (verificarToken, verificarAdmin) {
             let where, params;
             switch (seccion) {
                 case 'entrada':
-                    where = "d.seccion_actual = 'entrda' AND d.destinatario_id = $1"; params = [id]; break;
+                    where = "d.seccion_actual = 'entrada' AND d.destinatario_id = $1"; params = [id]; break;
                 case 'salida':
                     where = 'd.remitente_id = $1'; params = [id]; break;
                 case 'delegados':
@@ -304,7 +317,7 @@ module.exports = function (verificarToken, verificarAdmin) {
                     "SELECT id FROM usuarios WHERE email = $1 AND tipo = 'trabajador'", [delegadoEmail]
                 );
                 if (t.rowCount === 0) {
-                    await client.query('ROllBACK');
+                    await client.query('ROLLBACK');
                     return res.status(400).json({ error: 'El delegado debe ser un trabajador registrado.' });
                 }
                 delegadoId = t.rows[0].id;
@@ -334,7 +347,6 @@ module.exports = function (verificarToken, verificarAdmin) {
     });
 
     // Firmar: sube la version firmada (solo admin ). El original no se toca
-
     router.post('/documentos/:id/firmar', verificarToken, verificarAdmin, subirFirmada, async (req, res) => {
         if (!req.file) return res.status(400).json({ error: 'Seleciona el archivo firmado (PDF).' });
 
@@ -394,6 +406,93 @@ module.exports = function (verificarToken, verificarAdmin) {
             if (!res.headersSent) res.status(500).json({ error: 'Error al guardar la version firmada.' });
         } finally {
             client.release();
+        }
+    });
+
+    // Listar plantillas (todos los roles)
+    router.get('/plantillas', verificarToken, async (req, res) => {
+        try {
+            const { rows } = await pool.query(
+                `SELECT id, nombre descripcion, nombre_original AS "nombreArchivo",
+                    mime_type AS "mimeType", creado_en AS fecha
+                FROM plantillas ORDER BY creado_en DESC`);
+            res.json(rows);
+        } catch (error) {
+            console.error('Error al listar plantillas: ', error);
+            res.status(500).json({ error: 'Error al listar plantillas.' });
+        }
+    });
+
+    // Subir plantilla (solo admin)
+    router.post('/plantillas', verificarToken, verificarAdmin, subirPlantilla, async(req, res) => {
+        if (!req.file) return res.status(400).json({ error: 'Seleciona un archivo.' });
+        const nombre = (req.body.nombre || '').trim();
+        if(!nombre) {
+            fs.unlink(req.file.path, () => {});
+            return res.status(400).json({ error: 'El nombre de la plantilla es requerido.' });
+        }
+        try {
+            const rutaRelativa = path.relative(STORAGE_DIR, req.file.path).split(path.sep).join('/');
+            const nombreOriginal = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+            await pool.query(
+                `INSERT INTO plantillas
+                   (nombre, descripcion, nombre_original, ruta_archivo, mime_type, tamano_bytes, subido_por)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [nombre, (req.body.descripcion || '').trim() || null, nombreOriginal,
+                rutaRelativa, req.file.mimetype, req.file.size, req.user.id]);
+            res.status(201).json({ mensaje: 'Plantilla subida correctamente.' });
+        } catch (error) {
+            fs.unlink(req.file.path, () => {});
+            console.error('Error al subir plantilla: ', error);
+            res.status(500).jso({ error: 'Error al subir la plantilla.' });
+        }
+    });
+
+    // Ver (?ver=1, inline) o descargar (todos los roles)
+    router.get('/plantillas/:id/descargar', verificarToken, async (req, res) => {
+        try {
+            if (!esUuid(req.params.id)) return res.status(400).json({ error: 'Identificador invalido.' });
+            const { rows } = await pool.query(
+                'SELECT ruta_archivo, nombre_original, mime_type FROM plantillas WHERE id = $1',
+                [req.params.id]);
+            const p = rows[0];
+            if (!p) return res.status(404).json({ error: 'Plantilla no encontrada.' });
+
+            const absoluta = path.resolve(STORAGE_DIR, p.ruta_archivo);
+            if (!absoluta.startsWith(STORAGE_DIR + path.sep)) {
+                return res.status(400).json({ error: 'Ruta invalida.' });
+            }
+            if(!fs.existsSync(absoluta)) {
+                return res.status(400).json({ error: 'El archivo fisico no existe en el servidor.' });
+            }
+
+            if (req.query.ver === '1') {
+                return res.sendFile(absoluta, { headers: {
+                    'Content-Type': p.mime_type || 'application/octet-stream',
+                    'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(p.nombre_original)}`
+                }});
+            }
+            res.download(absoluta, p.nombre_original);
+        } catch (error) {
+            console.error('Error al descargar plantilla: ', error);
+            if (!res.headersSent) res.status(500).json({ error: 'Error al descargar la plantilla.' });
+        }
+    });
+
+    // Eliminar plantilla (solo admin)
+    router.delete('/plantillas/:id', verificarToken, verificarAdmin, async (req, res) => {
+        try {
+            if (!esUuid(req.params.id)) return res.status(400).json({ error: 'Identificador invalido.' });
+            const { rows } = await pool.query(
+                'DELETE FROM plantillas WHERE id = $1 RETURNING ruta_archivo', [req.params.id]);
+            if(rows.length === 0) return res.status (404).json({ error: 'Plantilla no encontrada.' });
+
+            const absoluta = path.resolve(STORAGE_DIR, rows[0].ruta_archivo);
+            if (absoluta.startsWith(STORAGE_DIR + path.sep)) fs.unlink(absoluta, () => {});
+            res.json({ mensaje: 'Plantilla eliminada.' });
+        } catch (error) {
+            console.error('Error al eliminar plantilla: ', error);
+            res.status(500).json({ error: 'Error al eliminar la plantilla.' });
         }
     });
 

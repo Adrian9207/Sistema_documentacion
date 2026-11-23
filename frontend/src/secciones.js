@@ -8,6 +8,7 @@ export const SECCIONES = {
     salida:     {titulo: 'Bandeja de salida',   roles: TODOS },
     derivar:    {titulo: 'Derivar',             roles: TODOS },
     dnis:       {titulo: 'Autorizar DNI',       roles: ['administrador']},
+    plantillas: { titulo: 'Plantillas',         roles: TODOS },
 };
 
 export const seccionesPara = (tipo) => 
